@@ -1,0 +1,30 @@
+# =====================================================================
+# SECRETS / CREDENTIALS — never commit. (aws_credentials.txt holds LIVE
+# AWS keys; it stays on disk for the scripts but must NOT go to git.)
+# =====================================================================
+aws_credentials.txt
+*credentials*
+*secret*
+*.tfvars
+*.pem
+*.key
+*pat*cred*
+.env
+.env.*
+
+# --- Databricks bundle local state ---
+.databricks/
+**/.databricks/
+
+# --- the real table inventory stays local (scope_tables.example.py IS committed) ---
+dab/src/scope_tables.py
+
+# --- OS / Python junk ---
+.DS_Store
+**/.DS_Store
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# --- local README preview (generated, not part of the repo) ---
+preview.html

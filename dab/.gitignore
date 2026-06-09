@@ -1,0 +1,9 @@
+.databricks/
+.DS_Store
+*.pyc
+__pycache__/
+
+# The real table inventory is never committed. Copy scope_tables.example.py to
+# scope_tables.py and fill it in locally. It still deploys (forced via sync.include
+# in databricks.yml) but stays out of git.
+src/scope_tables.py

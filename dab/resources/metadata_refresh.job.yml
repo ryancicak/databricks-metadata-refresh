@@ -1,0 +1,118 @@
+resources:
+  jobs:
+    metadata_refresh:
+      name: "[${bundle.target}] Foreign Catalog Metadata Refresh"
+      description: >-
+        Refreshes the in-scope foreign-catalog tables on serverless. Tables
+        that fail with an OOM-class error are retried on a classic cluster
+        carrying the static Spark conf they need. Hard failures (bad name,
+        permissions, schema) are surfaced separately and never touch classic.
+
+      tags:
+        team: data-platform
+        pattern: serverless-classic-fallback
+
+      schedule:
+        quartz_cron_expression: ${var.schedule_cron}
+        timezone_id: ${var.schedule_timezone}
+        # Created paused on purpose. Validate a manual run, then unpause.
+        pause_status: PAUSED
+
+      # Never let two refresh runs stack up on the same tables.
+      max_concurrent_runs: 1
+
+      tasks:
+        # 0) Preflight: fail fast with a plain-English message if the bundle is
+        #    misconfigured, before any table is touched or any cluster starts.
+        #    Checks the scope list, the failure log table, and the classic
+        #    instance types. Runs on serverless.
+        - task_key: preflight
+          description: Validate scope list, failure log table, and classic instance types.
+          notebook_task:
+            notebook_path: ../src/00_preflight.py
+            base_parameters:
+              failure_log_table: ${var.failure_log_table}
+              classic_node_type: ${var.classic_node_type}
+              classic_driver_type: ${var.classic_driver_type}
+
+        # 1) Serverless pass over every in-scope table. Per-table failures are
+        #    classified into OOM-class (retry on classic) vs hard (alert only)
+        #    and handed downstream via job task values. Runs only after preflight.
+        - task_key: try_serverless
+          depends_on:
+            - task_key: preflight
+          description: Refresh all scope tables on serverless; classify failures.
+          notebook_task:
+            notebook_path: ../src/01_try_serverless.py
+            base_parameters:
+              # Set failure_log_table in databricks.yml to enable the durable log.
+              failure_log_table: ${var.failure_log_table}
+              run_id: "{{job.run_id}}"
+
+        # 2) Did the serverless pass leave any OOM-class tables to retry?
+        - task_key: check_oom_failures
+          depends_on:
+            - task_key: try_serverless
+          condition_task:
+            op: GREATER_THAN
+            left: "{{tasks.try_serverless.values.failed_count}}"
+            right: "0"
+
+        # 3) Only when (2) is true: spin up the classic cluster with the static
+        #    Spark conf and retry just the OOM-class tables. When false this
+        #    task is SKIPPED and the cluster never starts -- that is the saving.
+        - task_key: fallback_classic
+          depends_on:
+            - task_key: check_oom_failures
+              outcome: "true"
+          notebook_task:
+            notebook_path: ../src/02_fallback_classic.py
+            base_parameters:
+              failure_log_table: ${var.failure_log_table}
+              run_id: "{{job.run_id}}"
+          job_cluster_key: classic_with_flags
+
+        # 4) Did the serverless pass surface any hard (non-OOM) failures?
+        - task_key: check_hard_failures
+          depends_on:
+            - task_key: try_serverless
+          condition_task:
+            op: GREATER_THAN
+            left: "{{tasks.try_serverless.values.hard_failure_count}}"
+            right: "0"
+
+        # 5) Only when (4) is true: log the hard-failure list for visibility.
+        #    Log-only -- it does NOT fail the run. Runs on serverless.
+        - task_key: log_hard_failures
+          depends_on:
+            - task_key: check_hard_failures
+              outcome: "true"
+          notebook_task:
+            notebook_path: ../src/03_log_hard_failures.py
+
+      job_clusters:
+        - job_cluster_key: classic_with_flags
+          # Classic, fixed-size (autoscaling OFF), Jobs Compute rate.
+          new_cluster:
+            spark_version: ${var.spark_version}
+            # Production recipe: 80 workers x r7gd.2xlarge (var-driven).
+            node_type_id: ${var.classic_node_type}
+            num_workers: ${var.classic_num_workers}
+            # Keep the driver big: it still collects 30-40 GB of metadata on the
+            # largest tables during the commit. A 2xlarge driver would OOM there,
+            # so the driver stays r7gd.12xlarge even though the workers are 2xlarge.
+            driver_node_type_id: ${var.classic_driver_type}
+            data_security_mode: SINGLE_USER
+            # NEVER spot for the classic fallback. A reclaimed node mid-convert
+            # fails the recovery this cluster exists to do. On-demand only.
+            aws_attributes:
+              availability: ON_DEMAND
+            spark_conf:
+              # The reason these tables cannot run on serverless: spark.task.cpus
+              # is a STATIC cluster setting (cannot be set per serverless query).
+              # 8 cores per task gives each task enough heap to deserialize the
+              # oversized Iceberg manifests (200 MB+ vs the 8 MB default target).
+              "spark.task.cpus": "8"
+              # Let the driver collect arbitrarily large results during the
+              # metadata convert without tripping maxResultSize.
+              "spark.driver.maxResultSize": "0"

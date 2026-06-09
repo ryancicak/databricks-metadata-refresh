@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monitoring Foreign-Catalog Metadata Refreshes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;0,9..40,800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#1A3A4B; --surface:#22495C; --heading:#FFFFFF; --body:#D4E4EB; --dim:#8BABB8;
+  --accent:#EB1600; --coral:#FF6B55; --green:#00D68F; --amber:#FFB74D;
+  --border:rgba(255,255,255,0.10); --border-bright:rgba(255,255,255,0.18);
+  --mono:'JetBrains Mono','SF Mono',Consolas,monospace;
+  --sans:'DM Sans',system-ui,-apple-system,sans-serif;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+body{
+  font-family:var(--sans); background:#0B1E26; color:var(--body);
+  min-height:100vh; display:flex; align-items:center; justify-content:center; overflow:hidden;
+}
+/* ---- 16:9 stage, scaled to fit ---- */
+#scaler{ width:1280px; height:720px; transform-origin:center center; }
+.stage{
+  position:relative; width:1280px; height:720px; overflow:hidden;
+  background:
+    radial-gradient(120% 90% at 88% -10%, rgba(255,107,85,0.10) 0%, rgba(255,107,85,0) 42%),
+    linear-gradient(140deg,#1E4354 0%,#163647 52%,#0F2A37 100%);
+  padding:52px 60px 0;
+  display:flex; flex-direction:column;
+}
+.stage::before{ /* top hairline accent */
+  content:""; position:absolute; top:0; left:0; right:0; height:3px;
+  background:linear-gradient(90deg,var(--accent) 0%,var(--coral) 38%,rgba(255,107,85,0) 80%);
+}
+/* faint geometric accent, upper-right */
+.deco{ position:absolute; top:-40px; right:-30px; opacity:.5; pointer-events:none; }
+
+/* ---- header ---- */
+.eyebrow{ display:flex; align-items:center; gap:10px; font-family:var(--mono); font-size:13px;
+  font-weight:600; letter-spacing:2.4px; text-transform:uppercase; color:var(--coral); margin-bottom:14px; }
+.eyebrow .dot{ width:7px; height:7px; border-radius:50%; background:var(--accent); box-shadow:0 0 0 4px rgba(235,22,0,.18); }
+.eyebrow .sep{ color:var(--dim); letter-spacing:0; }
+.eyebrow .muted{ color:var(--dim); }
+h1{ font-family:var(--sans); font-weight:700; font-size:44px; line-height:1.06; letter-spacing:-1.4px;
+  color:var(--heading); margin-bottom:10px; }
+.sub{ font-size:17px; color:var(--dim); max-width:62ch; line-height:1.5; }
+.sub b{ color:var(--body); font-weight:600; }
+
+/* ---- body grid ---- */
+.grid{ flex:1; display:grid; grid-template-columns:1.18fr 1fr; gap:34px; padding:30px 0 18px; min-height:0; }
+.col{ display:flex; flex-direction:column; gap:16px; min-width:0; }
+
+.kicker{ font-family:var(--mono); font-size:12px; font-weight:700; letter-spacing:1.4px; text-transform:uppercase; color:var(--body); display:flex; align-items:center; gap:9px; }
+.kicker .num{ display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; border-radius:6px;
+  background:rgba(255,107,85,.14); color:var(--coral); font-size:12px; font-weight:700; border:1px solid rgba(255,107,85,.35); }
+
+/* code block */
+.code{ background:#0E2530; border:1px solid var(--border); border-radius:12px; overflow:hidden;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.04), 0 14px 30px rgba(0,0,0,.28); }
+.code__bar{ display:flex; align-items:center; justify-content:space-between; padding:9px 16px;
+  background:rgba(255,255,255,.03); border-bottom:1px solid var(--border); }
+.code__name{ font-family:var(--mono); font-size:12px; font-weight:600; color:var(--body); letter-spacing:.3px; }
+.code__lang{ font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:1.4px; text-transform:uppercase; color:var(--dim); }
+.code pre{ margin:0; padding:16px 18px; font-family:var(--mono); font-size:13.5px; line-height:1.62; color:var(--body); white-space:pre; overflow:hidden; }
+.kw{ color:var(--coral); font-weight:600 } .str{ color:var(--green) } .id{ color:#9FE7FF } .cm{ color:var(--dim); font-style:italic }
+
+/* how-to-read rows */
+.read{ display:flex; flex-direction:column; gap:9px; }
+.row{ display:flex; align-items:flex-start; gap:12px; background:rgba(255,255,255,.035); border:1px solid var(--border);
+  border-radius:10px; padding:11px 14px; }
+.row .badge{ flex-shrink:0; font-family:var(--mono); font-size:11px; font-weight:700; letter-spacing:.4px; padding:4px 9px;
+  border-radius:6px; display:inline-flex; align-items:center; gap:7px; white-space:nowrap; }
+.badge::before{ content:""; width:7px; height:7px; border-radius:50%; flex-shrink:0; }
+.b-ok{ background:rgba(0,214,143,.14); color:var(--green) } .b-ok::before{ background:var(--green) }
+.b-oom{ background:rgba(255,107,85,.16); color:var(--coral) } .b-oom::before{ background:var(--coral) }
+.b-warn{ background:rgba(255,183,77,.15); color:var(--amber) } .b-warn::before{ background:var(--amber) }
+.row .txt{ font-size:13.5px; color:var(--body); line-height:1.4; }
+.row .txt b{ color:var(--heading); font-weight:600 }
+.row .txt .m{ font-family:var(--mono); font-size:12px; color:var(--dim); }
+.note{ font-size:12.5px; color:var(--dim); padding-left:2px; }
+.note b{ color:var(--coral); font-weight:600 } .note .m{ font-family:var(--mono); color:var(--body); }
+
+/* right-column cards */
+.card{ background:rgba(255,255,255,.035); border:1px solid var(--border); border-left:3px solid var(--coral);
+  border-radius:12px; padding:15px 17px; }
+.card h3{ font-family:var(--sans); font-size:15px; font-weight:700; color:var(--heading); margin-bottom:5px; letter-spacing:-.2px; }
+.card p{ font-size:13px; color:var(--dim); line-height:1.45; }
+.card p .m{ font-family:var(--mono); color:var(--body); font-size:12px; }
+.card .rule{ margin-top:9px; display:flex; flex-direction:column; gap:5px; }
+.rule .ri{ font-family:var(--mono); font-size:11.5px; color:var(--body); display:flex; gap:8px; align-items:baseline; }
+.rule .tag{ font-weight:700; letter-spacing:.5px; }
+.rule .tag.full{ color:var(--coral) } .rule .tag.inc{ color:var(--green) }
+
+/* tl;dr strip */
+.tldr{ margin-top:auto; display:grid; grid-template-columns:repeat(3,1fr); gap:0; border:1px solid var(--border);
+  border-radius:11px; overflow:hidden; background:rgba(255,255,255,.025); }
+.tl{ padding:11px 14px; border-left:1px solid var(--border); }
+.tl:first-child{ border-left:none; }
+.tl .q{ font-size:11.5px; color:var(--dim); line-height:1.3; margin-bottom:5px; }
+.tl .a{ font-family:var(--mono); font-size:11.5px; font-weight:600; color:var(--heading); letter-spacing:.2px; }
+.tl .a::before{ content:"→ "; color:var(--coral); }
+
+/* footer */
+.foot{ position:absolute; left:0; right:0; bottom:0; height:46px; display:flex; align-items:center; justify-content:space-between;
+  padding:0 60px; border-top:1px solid var(--border); }
+.foot .copy{ font-size:11.5px; color:var(--dim); display:flex; align-items:center; gap:10px; }
+.foot .tag{ font-family:var(--mono); font-size:11px; color:var(--dim); letter-spacing:.6px; }
+.foot .tag b{ color:var(--coral); }
+
+/* entrance */
+@keyframes up{ from{opacity:0; transform:translateY(14px)} to{opacity:1; transform:translateY(0)} }
+.r{ opacity:0; animation:up .5s ease forwards; animation-delay:calc(var(--i,0)*.08s); }
+@media (prefers-reduced-motion:reduce){ .r{ animation:none; opacity:1 } }
+</style>
+</head>
+<body>
+<div id="scaler">
+  <section class="stage">
+    <!-- geometric accent -->
+    <svg class="deco" width="320" height="240" viewBox="0 0 320 240" fill="none">
+      <polygon points="120,40 280,18 280,150 120,172" fill="#FF6B55" opacity="0.10"/>
+      <polygon points="160,60 300,40 300,168 160,150" fill="#EB1600" opacity="0.10"/>
+      <polygon points="195,78 312,64 312,182 195,168" fill="#FF6B55" opacity="0.08"/>
+    </svg>
+
+    <!-- header -->
+    <div class="r" style="--i:0">
+      <div class="eyebrow"><span class="dot"></span> Lakehouse Federation <span class="sep">·</span> <span class="muted">Operations</span></div>
+      <h1>Monitoring Foreign-Catalog Metadata Refreshes</h1>
+      <p class="sub">See <b>every</b> refresh — and catch the <b>out-of-memory</b> ones — from one place. No per-table digging.</p>
+    </div>
+
+    <!-- body -->
+    <div class="grid">
+      <!-- LEFT -->
+      <div class="col">
+        <div class="kicker r" style="--i:1"><span class="num">1</span> Start here — one query</div>
+        <div class="code r" style="--i:2">
+          <div class="code__bar"><span class="code__name">system.query.history</span><span class="code__lang">SQL</span></div>
+<pre><span class="kw">SELECT</span> start_time, statement_text, execution_status,
+       total_duration_ms, error_message
+<span class="kw">FROM</span>   <span class="id">system.query.history</span>
+<span class="kw">WHERE</span>  statement_text <span class="kw">ILIKE</span> <span class="str">'REFRESH FOREIGN TABLE%'</span>
+<span class="kw">ORDER BY</span> start_time <span class="kw">DESC</span>;</pre>
+        </div>
+
+        <div class="kicker r" style="--i:3" style="margin-top:4px">How to read the results</div>
+        <div class="read">
+          <div class="row r" style="--i:4"><span class="badge b-ok">FINISHED</span><span class="txt"><b>Refresh worked.</b></span></div>
+          <div class="row r" style="--i:5"><span class="badge b-oom">FAILED · OOM</span><span class="txt"><b>Out of memory</b> — <span class="m">TASK_FAILED_EXECUTOR_LOSS</span> / <span class="m">oom</span> / <span class="m">GC overhead</span>. Retry on a bigger cluster.</span></div>
+          <div class="row r" style="--i:6"><span class="badge b-warn">FAILED · OTHER</span><span class="txt"><span class="m">TABLE_OR_VIEW_NOT_FOUND</span> / permission → <b>name or access</b> issue (not memory).</span></div>
+        </div>
+        <p class="note r" style="--i:7">Long <span class="m">total_duration_ms</span> ≈ <b>full</b> refresh &nbsp;·&nbsp; short ≈ <b>incremental</b></p>
+      </div>
+
+      <!-- RIGHT -->
+      <div class="col">
+        <div class="card r" style="--i:4">
+          <h3><span style="color:var(--coral);font-family:var(--mono);font-size:13px">2 ·</span> When &amp; who last refreshed</h3>
+          <p>One row per table — <span class="m">last_altered</span>, <span class="m">last_altered_by</span>.</p>
+          <p style="margin-top:7px"><span class="m">system.information_schema.tables</span></p>
+        </div>
+
+        <div class="card r" style="--i:5">
+          <h3><span style="color:var(--coral);font-family:var(--mono);font-size:13px">3 ·</span> Exact full vs incremental</h3>
+          <p>Per-table only — the <span class="m">CLONE</span> op in <span class="m">DESCRIBE&nbsp;HISTORY&nbsp;&lt;table&gt;</span>:</p>
+          <div class="rule">
+            <span class="ri"><span class="tag full">FULL</span> numCopiedFiles == sourceNumOfFiles</span>
+            <span class="ri"><span class="tag inc">INCR</span> numCopiedFiles &nbsp;&lt;&lt;&nbsp; sourceNumOfFiles</span>
+          </div>
+        </div>
+
+        <!-- TL;DR -->
+        <div class="tldr r" style="--i:6">
+          <div class="tl"><div class="q">Ran / failed / OOM'd?</div><div class="a">query.history</div></div>
+          <div class="tl"><div class="q">When &amp; who?</div><div class="a">information_schema</div></div>
+          <div class="tl"><div class="q">Exact file counts?</div><div class="a">DESCRIBE HISTORY</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- footer -->
+    <div class="foot">
+      <span class="copy">
+        <svg width="16" height="16" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+          <path d="M32 4L56 18V22L32 36L8 22V18L32 4Z" fill="#EB1600"/>
+          <path d="M32 26L56 12V22L32 36L8 22V12L32 26Z" fill="#EB1600" opacity="0.85"/>
+          <path d="M32 36L56 22V32L32 46L8 32V22L32 36Z" fill="#EB1600" opacity="0.85"/>
+          <path d="M32 46L56 32V42L32 56L8 42V32L32 46Z" fill="#EB1600" opacity="0.7"/>
+        </svg>
+        &copy;2025 Databricks Inc. — All rights reserved
+      </span>
+      <span class="tag">monitor with <b>system.query.history</b></span>
+    </div>
+  </section>
+</div>
+
+<script>
+// Scale the fixed 1280x720 stage to fit any viewport while staying 16:9.
+(function(){
+  var s=document.getElementById('scaler');
+  function fit(){
+    var k=Math.min(window.innerWidth/1280, window.innerHeight/720);
+    s.style.transform='scale('+k+')';
+  }
+  fit(); window.addEventListener('resize',fit);
+})();
+</script>
+</body>
+</html>

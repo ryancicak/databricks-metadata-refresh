@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#F9F7F4; --surface:#FFFFFF; --heading:#0B2026; --body:#3a3a3a; --dim:#6f6f6f;
+    --coral:#E8563A; --red:#EB1600; --green:#00A972; --teal:#0B2026;
+    --border:rgba(11,32,38,.10);
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{background:var(--bg); font-family:'DM Sans',system-ui,sans-serif; color:var(--body);}
+  .wrap{width:1480px; padding:60px 64px 52px;}
+  .kicker{font-family:'JetBrains Mono',monospace; font-weight:600; font-size:13px; letter-spacing:1.6px;
+          text-transform:uppercase; color:var(--dim); display:flex; align-items:center; gap:10px;}
+  .dot{width:9px; height:9px; border-radius:50%; background:var(--coral); display:inline-block;}
+  h1{font-family:'DM Sans'; font-weight:800; font-size:40px; line-height:1.12; letter-spacing:-1.2px;
+     color:var(--heading); margin:16px 0 8px; max-width:1100px;}
+  .sub{font-size:18px; color:var(--dim); max-width:880px; line-height:1.5;}
+
+  .pipe{display:flex; align-items:stretch; gap:22px; margin-top:44px;}
+  .card{background:var(--surface); border:1px solid var(--border); border-radius:14px;
+        box-shadow:0 1px 5px rgba(11,32,38,.06); padding:22px 24px;}
+  .step{font-family:'JetBrains Mono',monospace; font-weight:600; font-size:11px; letter-spacing:1.4px;
+        text-transform:uppercase; color:var(--dim); margin-bottom:8px;}
+  .card h2{font-family:'DM Sans'; font-weight:700; font-size:21px; color:var(--heading); letter-spacing:-.3px;}
+  .card p{font-size:15px; color:var(--body); margin-top:6px; line-height:1.45;}
+  .lead{flex:0 0 300px; border-left:5px solid var(--teal);}
+  .lead2{flex:1; border-left:5px solid var(--teal);}
+
+  .chev{flex:0 0 22px; align-self:center; width:16px; height:16px;
+        border-top:3px solid #c4c0ba; border-right:3px solid #c4c0ba; transform:rotate(45deg);}
+
+  .splits{display:flex; align-items:center; gap:14px; margin:30px 0 4px; color:var(--dim);
+          font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:1.2px; text-transform:uppercase;}
+  .splits .bar{height:1px; background:var(--border); flex:1;}
+
+  .grid{display:grid; grid-template-columns:repeat(3,1fr); gap:22px; margin-top:18px;}
+  .out{background:var(--surface); border:1px solid var(--border); border-radius:14px; overflow:hidden;
+       box-shadow:0 1px 5px rgba(11,32,38,.06);}
+  .out .top{height:6px;}
+  .out .pad{padding:22px 24px;}
+  .tag{display:inline-block; font-family:'JetBrains Mono',monospace; font-weight:600; font-size:11px;
+       letter-spacing:1.2px; text-transform:uppercase; padding:4px 9px; border-radius:6px; margin-bottom:12px;}
+  .out h3{font-family:'DM Sans'; font-weight:700; font-size:19px; color:var(--heading); letter-spacing:-.3px;}
+  .out p{font-size:14.5px; color:var(--body); margin-top:7px; line-height:1.5;}
+  .g .top{background:var(--green);}  .g .tag{background:rgba(0,169,114,.12); color:#067a55;}
+  .c .top{background:var(--coral);}  .c .tag{background:rgba(232,86,58,.14); color:#b8381f;}
+  .k .top{background:#b9b3aa;}        .k .tag{background:rgba(11,32,38,.07); color:var(--dim);}
+
+  .foot{display:flex; gap:14px; margin-top:30px;}
+  .chip{font-size:14px; color:var(--heading); background:#fff; border:1px solid var(--border);
+        border-radius:999px; padding:9px 18px; font-weight:500;}
+  .chip b{color:var(--coral);}
+  .brand{margin-top:34px; font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--dim); letter-spacing:1px;}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="kicker"><span class="dot"></span>Foreign-Catalog Metadata Refresh</div>
+    <h1>One job. Serverless first, classic only for the tables that run out of memory.</h1>
+    <div class="sub">Most foreign Glue / Iceberg tables refresh fine on serverless. The few whose manifests are too large to convert get retried, automatically, on a cluster built to handle them.</div>
+
+    <div class="pipe">
+      <div class="card lead">
+        <div class="step">Step 0</div>
+        <h2>Preflight</h2>
+        <p>Validate the config and fail fast, before any table is touched or any cluster starts.</p>
+      </div>
+      <div class="chev"></div>
+      <div class="card lead2">
+        <div class="step">Step 1 &middot; Serverless</div>
+        <h2>Refresh every table</h2>
+        <p>Run REFRESH FOREIGN TABLE on each table on serverless, then sort the failures into out-of-memory versus real errors.</p>
+      </div>
+    </div>
+
+    <div class="splits"><span>Then, for each table</span><span class="bar"></span></div>
+
+    <div class="grid">
+      <div class="out g">
+        <div class="top"></div>
+        <div class="pad">
+          <span class="tag">Most tables</span>
+          <h3>Refreshed on serverless</h3>
+          <p>No memory pressure, no cluster. Cheap and done. A run with no OOMs never starts a classic cluster.</p>
+        </div>
+      </div>
+      <div class="out c">
+        <div class="top"></div>
+        <div class="pad">
+          <span class="tag">Out of memory</span>
+          <h3>Recovered on classic</h3>
+          <p>Step 2: retry just the OOM tables on a big-driver classic cluster carrying the static Spark conf those tables need.</p>
+        </div>
+      </div>
+      <div class="out k">
+        <div class="top"></div>
+        <div class="pad">
+          <span class="tag">Bad name / no access</span>
+          <h3>Logged, not retried</h3>
+          <p>Real errors are recorded with the run id and the message. Classic would fail on them too, so they are never retried.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="foot">
+      <div class="chip"><b>On-demand, never spot.</b>&nbsp; A reclaimed node mid-recovery would defeat the purpose.</div>
+      <div class="chip"><b>No OOM, no classic.</b>&nbsp; You only pay for the big cluster in the minutes it is needed.</div>
+    </div>
+
+    <div class="brand">Databricks Asset Bundle &nbsp;|&nbsp; serverless &rarr; classic fallback</div>
+  </div>
+</body>
+</html>

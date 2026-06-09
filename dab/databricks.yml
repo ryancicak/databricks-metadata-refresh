@@ -1,0 +1,126 @@
+# Databricks Asset Bundle: foreign-catalog metadata refresh
+# Pattern: refresh every table on serverless first; only the tables that
+# fail with an OOM-class error fall back to a classic cluster that carries
+# the static Spark conf those tables need (spark.task.cpus=8).
+#
+# Deploy:   databricks bundle deploy  -t dev   -p <profile>
+# Run once: databricks bundle run metadata_refresh -t dev -p <profile>
+# The job is created PAUSED. Unpause from the Jobs UI (or set pause_status
+# to UNPAUSED below) once you have validated a manual run.
+
+bundle:
+  name: metadata-refresh
+
+include:
+  - resources/*.yml
+
+# scope_tables.py holds the table inventory and is .gitignore'd so it
+# never lands in version control. Force-include it here so it still deploys to
+# the workspace (01_try_serverless loads it via %run ./scope_tables).
+sync:
+  include:
+    - src/scope_tables.py
+
+variables:
+  classic_node_type:
+    description: >-
+      Worker instance type for the classic fallback cluster. r7gd.2xlarge
+      (Graviton3, memory-optimized + local NVMe) cleared the heaviest table at
+      a fraction of the i3.8xlarge cost. Production recipe = 80 of these.
+    default: r7gd.2xlarge
+  classic_driver_type:
+    description: >-
+      Driver instance type. Kept large (r7gd.12xlarge, 384 GB) even though
+      workers are 2xlarge: the driver still collects 30-40 GB of metadata on the
+      biggest tables during the commit and a smaller driver would OOM there.
+    default: r7gd.12xlarge
+  classic_num_workers:
+    description: Fixed worker count (autoscaling off) for the classic cluster.
+    default: 80
+  spark_version:
+    description: DBR for the classic fallback cluster (17.3 LTS or newer).
+    default: 17.3.x-scala2.13
+  schedule_cron:
+    description: >-
+      Quartz cron for the scheduled refresh. Default = top of every 4th hour.
+    default: "0 0 0/4 * * ?"
+  schedule_timezone:
+    default: America/Los_Angeles
+  failure_log_table:
+    description: >-
+      Optional <catalog>.<schema>.<table> to append every serverless refresh
+      failure to (both OOM-class-retried and hard-skipped, tagged by action).
+      Blank disables the durable log; failures still print and alert.
+    default: ""
+
+targets:
+  # Default target for iterating. Resources get a [dev <user>] prefix and the
+  # schedule is paused, so deploying here never silently starts refreshing prod.
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://<your-workspace>.cloud.databricks.com
+    # Production fallback recipe: 80 x r7gd.2xlarge workers + r7gd.12xlarge driver,
+    # on-demand (pinned in the job yml). r7gd = Graviton3, memory-optimized + local
+    # NVMe. The classic fallback only launches in a workspace that permits classic
+    # EC2 and has the on-demand quota and free subnet IPs for the worker count. See
+    # the interop target and the README for the proven single-node run.
+    variables:
+      classic_num_workers: 80
+      classic_node_type: r7gd.2xlarge
+      classic_driver_type: r7gd.12xlarge
+      failure_log_table: "<catalog>.<schema>.metadata_refresh_failures"
+
+  # Cheap target for a simulate test run: a 1-node classic cluster so the
+  # OOM -> classic branch can fire without spinning up the full fleet. Point it
+  # at a workspace that has BOTH serverless and classic compute.
+  test:
+    mode: development
+    workspace:
+      host: https://<your-workspace>.cloud.databricks.com
+    variables:
+      classic_num_workers: 1
+      classic_driver_type: r7gd.2xlarge
+
+  # LIVE single-node classic-fallback test in a classic-capable workspace (one
+  # that can launch classic EC2, unlike a governance-locked sandbox). A serverless OOM on
+  # oom_big is recovered on a REAL on-demand r7gd classic cluster here.
+  # r7gd is allowlisted here (both r6gd + r7gd are); r7gd is the chosen family.
+  interop:
+    mode: development
+    workspace:
+      host: https://<your-workspace>.cloud.databricks.com
+    variables:
+      # SINGLE-NODE, just for this test. This shared workspace's subnet is IP-
+      # starved at the VPC level (even 3 nodes hit AWS_INSUFFICIENT_FREE_ADDRESSES_
+      # IN_SUBNET, despite only 1 cluster running), so the recovery runs on ONE
+      # node = 1 IP: the big r7gd.12xlarge driver (384 GB, spark.task.cpus=8) is
+      # itself more than enough to deserialize one 1.1 GB manifest. The production
+      # recipe is still 80 x r7gd.2xlarge (override below makes it single-node).
+      classic_node_type: r7gd.12xlarge
+      classic_driver_type: r7gd.12xlarge
+      classic_num_workers: 0
+      failure_log_table: "<catalog>.<schema>.metadata_refresh_failures"
+    # Target-scoped single-node override (does NOT touch dev/prod's 80-node recipe).
+    resources:
+      jobs:
+        metadata_refresh:
+          job_clusters:
+            - job_cluster_key: classic_with_flags
+              new_cluster:
+                spark_conf:
+                  spark.databricks.cluster.profile: singleNode
+                  spark.master: "local[*]"
+                custom_tags:
+                  ResourceClass: SingleNode
+
+  prod:
+    mode: production
+    workspace:
+      host: https://<your-workspace>.cloud.databricks.com
+      root_path: /Shared/.bundle/${bundle.name}/${bundle.target}
+    # Run the scheduled job as a service principal rather than a named user so
+    # it keeps running after any one person leaves. Fill in the SP app id.
+    # run_as:
+    #   service_principal_name: <refresh-job-sp-application-id>
