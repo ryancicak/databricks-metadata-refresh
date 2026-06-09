@@ -103,10 +103,16 @@ resources:
             # so the driver stays r7gd.12xlarge even though the workers are 2xlarge.
             driver_node_type_id: ${var.classic_driver_type}
             data_security_mode: SINGLE_USER
-            # NEVER spot for the classic fallback. A reclaimed node mid-convert
-            # fails the recovery this cluster exists to do. On-demand only.
+            # Availability for the recovery cluster. Default is ON_DEMAND: this is
+            # the last line of defense for tables that already OOM'd, and a spot
+            # reclaim mid-convert can re-trigger the OOM (or kill the job outright if
+            # the driver is lost). To trade some reliability for cost, set
+            # classic_availability to SPOT_WITH_FALLBACK; classic_first_on_demand
+            # keeps the driver (and N-1 workers) on-demand so a reclaim can't kill
+            # the job. See the README "design choices" for the full trade-off.
             aws_attributes:
-              availability: ON_DEMAND
+              availability: ${var.classic_availability}
+              first_on_demand: ${var.classic_first_on_demand}
             spark_conf:
               # The reason these tables cannot run on serverless: spark.task.cpus
               # is a STATIC cluster setting (cannot be set per serverless query).

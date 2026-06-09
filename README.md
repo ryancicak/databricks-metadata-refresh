@@ -136,7 +136,7 @@ Serverless runs first. Most tables refresh on serverless, with no cluster to spi
 
 Classic only comes up on an OOM. The big cluster starts only for the tables that ran out of memory, then it shuts down again.
 
-On-demand, never spot. If a spot node gets reclaimed in the middle of a refresh it fails the exact recovery the cluster exists to do, so the fallback cluster is pinned to on-demand.
+On-demand by default, spot if you choose. The fallback defaults to on-demand because it is the last line of defense for tables that already ran out of memory: a spot node reclaimed mid-convert can re-trigger the OOM, or kill the run outright if it is the driver. If you want the cost saving, set `classic_availability` to `SPOT_WITH_FALLBACK` and leave `classic_first_on_demand` at 1 so the driver stays on-demand. The savings are small here, since the cluster runs rarely and briefly, which is why on-demand is the default.
 
 Everything is logged. Each failure is recorded as either retried-on-classic or skipped, along with the run id and the error message.
 

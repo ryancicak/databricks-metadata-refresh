@@ -37,6 +37,20 @@ variables:
   classic_num_workers:
     description: Fixed worker count (autoscaling off) for the classic cluster.
     default: 80
+  classic_availability:
+    description: >-
+      AWS availability for the recovery cluster. ON_DEMAND (default, safest):
+      this is the fallback for tables that already OOM'd, so a spot reclaim
+      mid-convert risks re-triggering the OOM. SPOT_WITH_FALLBACK trades some
+      reliability for cost (spot, falling back to on-demand if spot is
+      unavailable at launch). SPOT is cheapest and least safe.
+    default: ON_DEMAND
+  classic_first_on_demand:
+    description: >-
+      Number of nodes, starting with the driver, kept ON_DEMAND even when
+      classic_availability is spot. Keep at 1 or more so the driver is never a
+      spot node: losing the driver kills the whole recovery with no retry.
+    default: 1
   spark_version:
     description: DBR for the classic fallback cluster (17.3 LTS or newer).
     default: 17.3.x-scala2.13
