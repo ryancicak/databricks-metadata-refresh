@@ -178,7 +178,9 @@ RETRY_PATTERNS = [
         r"ExecutorLostFailure",          # executor died mid-task
         r"executor\s+\d+\s+exited",      # "executor 141 exited caused by..."
         r"Command exited with code 52",  # OOM-killer exit code
-        r"\boom\b",                      # bare "oom" in the reason text
+        r"reason:[^\n]*\boom\b",         # "oom" inside an executor-loss Reason line (NOT a table/path literally named 'oom')
+        r"OUT_OF_MEMORY",                # any [*_OUT_OF_MEMORY] error class (JVM, Photon native, ...)
+        r"maxResultSize",                # driver result-size overflow -- the classic cluster sets maxResultSize=0, so it fixes this
         r"remote rpc client disassociated",  # container exceeded memory thresholds
         r"heartbeat_timeout",            # executor stopped heartbeating (mem starvation)
     ]
@@ -204,11 +206,22 @@ _SANITY = [
     "(executor 340 exited caused by one of the running tasks) Reason: heartbeat_timeout, "
     "unknown cause SQLSTATE: XX000",
     "Job aborted due to stage failure: java.lang.OutOfMemoryError: GC overhead limit exceeded",
+    # Driver result-size overflow and Photon native OOM carry no java.lang.OutOfMemoryError
+    # text, but the classic cluster (maxResultSize=0, more heap per task) still fixes them.
+    "org.apache.spark.SparkException: Total size of serialized results is bigger than spark.driver.maxResultSize",
+    "[PHOTON_OUT_OF_MEMORY] Photon ran out of memory while executing this query.",
 ]
 assert all(is_oom_class(m) for m in _SANITY), "OOM regex failed to match a known OOM error"
-# And a hard failure must NOT match.
-assert not is_oom_class("AnalysisException: Table or view 'foo' not found"), \
-    "OOM regex wrongly matched a hard failure"
+# Hard failures must NOT match -- including ones whose table name, storage path, or column
+# happens to contain a delimited 'oom'. The regex must key off the executor Reason line, not
+# the echoed object name, or a broken table named '...oom...' is wrongly retried on classic.
+for _hard in (
+    "AnalysisException: Table or view 'foo' not found",
+    "AnalysisException: Table or view 'prod_db.oom.fact' not found",
+    "Path s3://datalake/oom/part-0001 does not exist",
+    "AnalysisException: foreign Iceberg table uses row-level deletes (merge-on-read), unsupported for prod.oom_fact.t",
+):
+    assert not is_oom_class(_hard), f"OOM regex wrongly matched a hard failure: {_hard[:60]}"
 print("OOM classifier sanity check passed.")
 
 # COMMAND ----------

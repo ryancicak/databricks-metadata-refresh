@@ -67,6 +67,7 @@ if not hard_failures and hard_count and LOG_TABLE:
             .where(col("action") == "hard_skip")
             .where(col("run_id") == RUN_ID)
             .select("table_name", "error_message")
+            .distinct()  # a Databricks task retry re-appends rows under the same run_id; dedup so the count matches 02
             .collect()
         )
         hard_failures = [{"table": r["table_name"], "error": r["error_message"] or ""} for r in rows]
