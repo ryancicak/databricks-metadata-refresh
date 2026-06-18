@@ -10,23 +10,83 @@
 # MAGIC captured in `try_serverless` (printed there, and appended to
 # MAGIC `failure_log_table` if configured). If you would rather be paged, wire a
 # MAGIC job notification to this task or re-enable the raise at the bottom.
+# MAGIC
+# MAGIC The hard-failure list is read from the **per-run DBFS handoff file**
+# MAGIC `try_serverless` writes (not a task value: the list can be most of ~200
+# MAGIC tables when federation cannot read merge-on-read tables, which is exactly
+# MAGIC what blew the task-value size cap before). This task is log-only, so an
+# MAGIC unreadable handoff degrades to "nothing to print" and never fails the run.
 
 # COMMAND ----------
 
 import json
 
-hard_json = dbutils.jobs.taskValues.get(
-    taskKey="try_serverless",
-    key="hard_failures",
-    default="[]",
-    debugValue="[]",
+# Bounded count the producer always sets (independent of how many tables failed).
+hard_count = dbutils.jobs.taskValues.get(
+    taskKey="try_serverless", key="hard_failure_count", default=0, debugValue=0
 )
-hard_failures = json.loads(hard_json)
+hard_dir = dbutils.jobs.taskValues.get(
+    taskKey="try_serverless", key="hard_handoff_dir", default="", debugValue=""
+)
+# Published by try_serverless so this task can recover the detail from the durable
+# log if the DBFS handoff is ever unreadable (e.g. DBFS root disabled).
+LOG_TABLE = dbutils.jobs.taskValues.get(
+    taskKey="try_serverless", key="failure_log_table", default="", debugValue=""
+)
+RUN_ID = dbutils.jobs.taskValues.get(
+    taskKey="try_serverless", key="run_id", default="manual", debugValue="manual"
+)
 
+
+def read_handoff(handoff_dir: str):
+    """Read a sharded DBFS handoff dir back into its object, via dbutils.fs
+    (works on serverless and classic; /dbfs FUSE does not exist on serverless)."""
+    manifest = json.loads(dbutils.fs.head(f"{handoff_dir}/_manifest.json"))
+    buf = [
+        dbutils.fs.head(f"{handoff_dir}/part-{idx:05d}.json", 1 << 30)
+        for idx in range(int(manifest["parts"]))
+    ]
+    return json.loads("".join(buf))
+
+
+hard_failures = []
+if hard_dir:
+    try:
+        hard_failures = read_handoff(hard_dir)
+    except Exception as e:  # noqa: BLE001 -- log-only task, never fail the run
+        print(f"WARN: could not read hard-failure handoff {hard_dir}: {type(e).__name__}: {e}")
+
+# Fallback: if the DBFS handoff was missing/unreadable but a durable log is
+# configured, recover the full detail from it (rows this run tagged hard_skip).
+# Still log-only -- any problem here just prints a warning, never fails the run.
+if not hard_failures and hard_count and LOG_TABLE:
+    try:
+        from pyspark.sql.functions import col
+        rows = (
+            spark.table(LOG_TABLE)
+            .where(col("action") == "hard_skip")
+            .where(col("run_id") == RUN_ID)
+            .select("table_name", "error_message")
+            .collect()
+        )
+        hard_failures = [{"table": r["table_name"], "error": r["error_message"] or ""} for r in rows]
+        if hard_failures:
+            print(f"recovered {len(hard_failures)} hard failure(s) from {LOG_TABLE}")
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN: could not read hard failures from log {LOG_TABLE}: {type(e).__name__}: {e}")
+
+if not hard_failures and hard_count:
+    print(f"NOTE: producer reported {hard_count} hard failure(s) but the detail was not "
+          "recoverable from the DBFS handoff or the log; see try_serverless output for the per-table lines.")
+
+_PREVIEW = 50  # cap the print so a run with 100k hard failures can't flood output
 print(f"{len(hard_failures)} hard (non-OOM) failure(s) -- logged, not retried, run not failed:\n")
-for hf in hard_failures:
+for hf in hard_failures[:_PREVIEW]:
     print(f"  {hf['table']}")
-    print(f"    {hf['error'][:300]}\n")
+    print(f"    {str(hf.get('error', ''))[:300]}\n")
+if len(hard_failures) > _PREVIEW:
+    print(f"  ... and {len(hard_failures) - _PREVIEW} more (full list in the DBFS handoff "
+          "and, if configured, failure_log_table).")
 
 # COMMAND ----------
 

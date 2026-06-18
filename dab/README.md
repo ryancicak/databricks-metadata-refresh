@@ -67,6 +67,31 @@ Deploy `-t prod` for the production target.
 
 ---
 
+## How tasks hand off the failure lists
+
+The tasks run on different compute (serverless for the passes, a classic cluster
+for the fallback), so they can only share data through `dbutils.jobs.taskValues`
+(small, hard size cap) or a store both can reach. The per-table lists — the OOM
+tables to retry and the hard failures to log — can be most of the scope at once
+(foreign-Iceberg federation cannot read merge-on-read / row-level-delete tables,
+so a big chunk fails together), which overflowed the task-value cap and failed
+the whole run on the handoff line (`INVALID_PARAMETER_VALUE: The task value is
+too large`).
+
+The lists now go to a **per-run JSON file on DBFS** (`dbfs:/tmp/metadata_refresh
+/handoff/<run_id>/...`, sharded so no single write exceeds the `dbutils.fs.put`
+limit), and task values carry only fixed-size scalars — the two failure counts
+the condition tasks compare, plus the short DBFS path the consumers read. Nothing
+on task values grows with the number of failures, so the size error is
+structurally impossible at any scale (1, 200, 100k tables). DBFS is used
+deliberately: it is the one location reachable from both serverless and classic
+with **zero config** (no UC volume, storage location, or `CREATE TABLE` grant),
+read/written via `dbutils.fs` rather than the `/dbfs` FUSE mount (FUSE is not
+available on serverless). The handoff is wrapped so a DBFS hiccup never fails the
+run, and the classic fallback re-derives its complete OOM list from
+`failure_log_table` if the file is ever unreadable, then refuses to run a partial
+list (it would silently skip real OOM tables).
+
 ## Where failures are recorded
 
 The job never fails the run on a refresh error — every table is attempted

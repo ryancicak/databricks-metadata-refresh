@@ -12,6 +12,8 @@
 # MAGIC  1. the scope list loaded and is not empty
 # MAGIC  2. failure_log_table is blank (disabled) or a real catalog.schema that exists
 # MAGIC  3. the classic worker and driver instance types exist in this workspace
+# MAGIC  4. the cross-task handoff store (DBFS) round-trips here; if it cannot AND
+# MAGIC     failure_log_table is blank, the classic fallback has no channel for its list
 # MAGIC
 # MAGIC What it cannot check from here (no AWS access): on-demand quota and free
 # MAGIC subnet IPs for the classic cluster. Those still have to be confirmed in
@@ -103,6 +105,50 @@ except Exception as e:  # noqa: BLE001 -- never let the check itself break the r
         f"could not verify classic instance types ({type(e).__name__}): {str(e)[:160]}. "
         "Confirm the types are available in this workspace manually."
     )
+
+# COMMAND ----------
+
+# Check 4: the cross-task handoff store works on THIS compute. The producer hands
+# the (possibly large) failure lists to the classic + logging tasks via a per-run
+# DBFS file (dbutils.fs), because task values are size-capped. On a UC-only /
+# DBFS-root-disabled workspace that write can be blocked. Prove it now with a
+# write+read round-trip through the SAME head() path the consumers use, at a
+# realistic ~49 KB shard (under head's 64 KiB read cap), so a non-functional store
+# fails fast here instead of mid-run.
+import json as _json
+
+_canary = "dbfs:/tmp/metadata_refresh/preflight_canary"
+try:
+    _payload = _json.dumps({"canary": "x" * 49000})
+    try:
+        dbutils.fs.rm(_canary, recurse=True)
+    except Exception:  # noqa: BLE001
+        pass
+    dbutils.fs.mkdirs(_canary)
+    dbutils.fs.put(f"{_canary}/part-00000.json", _payload, overwrite=True)
+    _back = dbutils.fs.head(f"{_canary}/part-00000.json", 1 << 30)
+    try:
+        dbutils.fs.rm(_canary, recurse=True)
+    except Exception:  # noqa: BLE001
+        pass
+    if _back != _payload:
+        raise RuntimeError("DBFS write+read round-trip did not match (read truncated?)")
+    print("handoff store (DBFS): write+read round-trip ok")
+except Exception as e:  # noqa: BLE001
+    _have_log = bool(LOG_TABLE) and "<" not in LOG_TABLE and ">" not in LOG_TABLE
+    if _have_log:
+        warnings.append(
+            f"DBFS handoff store is not usable here ({type(e).__name__}: {str(e)[:120]}). "
+            "The run will rely on failure_log_table to hand off the OOM-retry list, and "
+            "hard-failure detail may show as a count only. Functional but degraded."
+        )
+    else:
+        problems.append(
+            f"DBFS handoff store is not usable here ({type(e).__name__}: {str(e)[:120]}) AND "
+            "failure_log_table is blank. The classic OOM fallback would have no channel to "
+            "receive its table list. Set failure_log_table to a catalog.schema.table you can "
+            "write, then re-run."
+        )
 
 # COMMAND ----------
 
