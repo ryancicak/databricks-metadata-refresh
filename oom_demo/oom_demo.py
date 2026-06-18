@@ -14,6 +14,8 @@ Modes (argv[1]):
              from its metadata.json pointer; no rebuild, no data touched
   inspect  - print metadata stats (files, manifest count, manifest sizes) for a table
   drop     - drop a table
+  mor      - format-version 2 table with MERGE-ON-READ row-level deletes (carries
+             position-delete files; Databricks foreign federation cannot read these)
 
 Usage on EMR:
   spark-submit ... oom_demo.py hello
@@ -192,6 +194,36 @@ def main():
         df = spark.range(start, start + files).selectExpr(*exprs).repartition(files)
         df.writeTo(full(t)).append()
         print(f"appended {files} new files to {full(t)}")
+        show_meta(spark, t)
+
+    elif mode == "mor":
+        # Format-version 2 table with MERGE-ON-READ row-level deletes. A DELETE
+        # under write.delete.mode=merge-on-read writes POSITION-DELETE files
+        # instead of rewriting the data files -- that is what makes it MoR, and
+        # what Databricks foreign-Iceberg federation cannot read.
+        t = get_arg("--tbl", "mor_v2")
+        rows = get_arg("--rows", 2000, int)
+        ver = get_arg("--version", "2")  # 2 or 3; v3 deletes use deletion vectors
+        spark.sql(f"DROP TABLE IF EXISTS {full(t)}")
+        spark.sql(
+            f"CREATE TABLE {full(t)} (id bigint, val string) USING iceberg "
+            f"TBLPROPERTIES ('format-version'='{ver}', "
+            f"'write.delete.mode'='merge-on-read', "
+            f"'write.update.mode'='merge-on-read', "
+            f"'write.merge.mode'='merge-on-read')"
+        )
+        spark.range(0, rows).selectExpr(
+            "id", "concat('v', cast(id as string)) AS val"
+        ).writeTo(full(t)).append()
+        # Delete a third of the rows -> position-delete files (merge-on-read).
+        spark.sql(f"DELETE FROM {full(t)} WHERE id % 3 = 0")
+        live = spark.table(full(t)).count()
+        try:
+            ndel = spark.sql(f"SELECT count(*) c FROM {full(t)}.all_delete_files").first().c
+            ndata = spark.sql(f"SELECT count(*) c FROM {full(t)}.all_data_files").first().c
+            print(f"MOR table {full(t)}: data_files={ndata} delete_files={ndel} live_rows={live}")
+        except Exception as e:  # noqa: BLE001
+            print(f"MOR table {full(t)}: live_rows={live} (delete-file count unavailable: {type(e).__name__})")
         show_meta(spark, t)
 
     else:

@@ -206,6 +206,13 @@ try:
     for idx, ch in enumerate(chunks):
         dbutils.fs.put(f"{d}/part-{idx:05d}.json", ch, overwrite=True)
     dbutils.fs.put(f"{d}/_manifest.json", json.dumps({"parts": len(chunks)}), overwrite=True)
+    # Read the shards back the same way readers do (dbutils.fs.head) and verify the
+    # payload round-trips, matching the producer's self-check in 01_try_serverless.
+    readback = "".join(
+        dbutils.fs.head(f"{d}/part-{idx:05d}.json", 1 << 30) for idx in range(len(chunks))
+    )
+    if readback != payload:
+        raise RuntimeError(f"still-failing handoff self-check failed for {d}: read-back mismatch (shard truncated?)")
     classic_still_failing_dir = d
 except Exception as e:  # noqa: BLE001 -- recording must not fail the task
     print(f"WARN: could not write still-failing handoff: {type(e).__name__}: {e}")
@@ -218,14 +225,15 @@ dbutils.jobs.taskValues.set("classic_still_failing_dir", classic_still_failing_d
 if LOG_TABLE and still_failing:
     try:
         from pyspark.sql import functions as F
-        rows = [(r["table"], "classic_still_failing", r["error"][:4000]) for r in still_failing]
+        # reason="oom": these are OOM-class tables that classic also could not fix.
+        rows = [(r["table"], "classic_still_failing", "oom", r["error"][:4000]) for r in still_failing]
         (
-            spark.createDataFrame(rows, "table_name string, action string, error_message string")
+            spark.createDataFrame(rows, "table_name string, action string, reason string, error_message string")
             .withColumn("run_id", F.lit(RUN_ID))
             .withColumn("mode", F.lit(MODE))
             .withColumn("logged_at", F.current_timestamp())
-            .select("logged_at", "run_id", "mode", "table_name", "action", "error_message")
-            .write.mode("append").saveAsTable(LOG_TABLE)
+            .select("logged_at", "run_id", "mode", "table_name", "action", "reason", "error_message")
+            .write.mode("append").option("mergeSchema", "true").saveAsTable(LOG_TABLE)
         )
         print(f"Logged {len(rows)} still-failing table(s) to {LOG_TABLE}.")
     except Exception as e:  # noqa: BLE001 -- logging must not fail the task

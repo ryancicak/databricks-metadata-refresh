@@ -5,7 +5,7 @@ that fails with an out-of-memory error is retried on a **classic cluster** that
 carries the static `spark.task.cpus=8` conf those tables need. Non-OOM failures
 (bad name, permissions, schema) are logged and alerted, never retried on classic.
 
-![Refresh pattern](docs/refresh_pattern.png)
+![Refresh pattern](docs/workflow.png)
 
 ---
 
@@ -13,7 +13,7 @@ carries the static `spark.task.cpus=8` conf those tables need. Non-OOM failures
 
 | Where | Replace |
 |---|---|
-| `databricks.yml` → `targets.dev` / `targets.prod` / `targets.test` → `host` | your workspace URL(s) — every host is a `<...>  # REPLACE` placeholder |
+| `databricks.yml` → `targets.dev` / `targets.prod` / `targets.test` → `host` | your workspace URL(s) — every host is a `https://<your-workspace>.cloud.databricks.com` placeholder |
 | `src/scope_tables.py` | the table list. Copy the template and fill it in: `cp src/scope_tables.example.py src/scope_tables.py`, then paste your fully-qualified table names. (This file is gitignored — it never gets committed — but still deploys.) |
 
 Optional, in `databricks.yml` → `variables`:
@@ -23,7 +23,7 @@ Optional, in `databricks.yml` → `variables`:
   you just need `CREATE TABLE` on a schema the job's run-as principal owns (no S3
   path, volume, or storage location to configure).
 - `classic_num_workers` / `classic_node_type` / `classic_driver_type` — classic
-  cluster size (defaults: 80 × `r6gd.2xlarge`, driver `r6gd.8xlarge`).
+  cluster size (defaults: 80 × `r7gd.2xlarge`, driver `r7gd.12xlarge`).
 
 ---
 
@@ -62,6 +62,11 @@ databricks bundle run   metadata_refresh -t dev -p <your-profile> --notebook-par
 The job is created **paused**. Once a live run looks right, unpause it in the
 Jobs UI (or set `pause_status: UNPAUSED` in `resources/metadata_refresh.job.yml`).
 Default schedule is the top of every 4th hour (`schedule_cron` in `databricks.yml`).
+
+> **Note:** every `databricks bundle deploy` re-applies `pause_status: PAUSED`, so a
+> redeploy silently re-pauses a schedule you had unpaused. After any redeploy to a
+> live target, re-unpause it (or set `pause_status: UNPAUSED` in the job yml to make
+> unpaused the deployed state).
 
 Deploy `-t prod` for the production target.
 
@@ -105,9 +110,12 @@ independently and errors are recorded, not raised. They show up in two places:
 - **A durable Delta table (optional).** Set `failure_log_table` to turn on a
   queryable record. It's a UC **managed** table, so you only need `CREATE TABLE`
   on a schema the job's run-as principal owns — no S3 path, volume, or storage
-  location to set up. Each row is tagged by action: `oom_retry_classic`,
-  `hard_skip` (non-OOM, not retried), or `classic_still_failing`. If the write
-  ever fails, it warns and the run still succeeds — logging never breaks the job.
+  location to set up. Each row is tagged by `action` (`oom_retry_classic`,
+  `hard_skip`, or `classic_still_failing`) and by `reason` — a coarse cause for the
+  non-OOM failures (`v2_mor_delete_files`, `table_not_found`, `permission`,
+  `stale_metadata_pointer`, `other`) so you can see at a glance how many tables
+  failed for each cause. If the write ever fails, it warns and the run still
+  succeeds — logging never breaks the job.
 
 ---
 

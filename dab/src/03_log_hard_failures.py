@@ -62,15 +62,22 @@ if hard_dir:
 if not hard_failures and hard_count and LOG_TABLE:
     try:
         from pyspark.sql.functions import col
+        tbl = spark.table(LOG_TABLE)
+        # reason is optional: a log table written by a pre-reason version won't have it.
+        cols = ["table_name", "error_message"] + (["reason"] if "reason" in tbl.columns else [])
         rows = (
-            spark.table(LOG_TABLE)
+            tbl
             .where(col("action") == "hard_skip")
             .where(col("run_id") == RUN_ID)
-            .select("table_name", "error_message")
+            .select(*cols)
             .distinct()  # a Databricks task retry re-appends rows under the same run_id; dedup so the count matches 02
             .collect()
         )
-        hard_failures = [{"table": r["table_name"], "error": r["error_message"] or ""} for r in rows]
+        hard_failures = [
+            {"table": r["table_name"], "error": r["error_message"] or "",
+             "reason": (r["reason"] if "reason" in cols and r["reason"] else "other")}
+            for r in rows
+        ]
         if hard_failures:
             print(f"recovered {len(hard_failures)} hard failure(s) from {LOG_TABLE}")
     except Exception as e:  # noqa: BLE001
@@ -80,10 +87,19 @@ if not hard_failures and hard_count:
     print(f"NOTE: producer reported {hard_count} hard failure(s) but the detail was not "
           "recoverable from the DBFS handoff or the log; see try_serverless output for the per-table lines.")
 
+# Per-reason breakdown first (bounded), so the operator sees WHY before the list.
+if hard_failures:
+    from collections import Counter
+    _by_reason = Counter(hf.get("reason", "other") for hf in hard_failures)
+    print("hard-failure reasons:")
+    for _reason, _n in _by_reason.most_common():
+        print(f"  {_reason:24s}: {_n}")
+    print()
+
 _PREVIEW = 50  # cap the print so a run with 100k hard failures can't flood output
 print(f"{len(hard_failures)} hard (non-OOM) failure(s) -- logged, not retried, run not failed:\n")
 for hf in hard_failures[:_PREVIEW]:
-    print(f"  {hf['table']}")
+    print(f"  [{hf.get('reason', 'other')}] {hf['table']}")
     print(f"    {str(hf.get('error', ''))[:300]}\n")
 if len(hard_failures) > _PREVIEW:
     print(f"  ... and {len(hard_failures) - _PREVIEW} more (full list in the DBFS handoff "

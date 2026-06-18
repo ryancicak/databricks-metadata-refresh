@@ -227,6 +227,58 @@ print("OOM classifier sanity check passed.")
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Hard-failure reason classifier
+# MAGIC
+# MAGIC Non-OOM failures all go to the same `hard_skip` bucket (never retried on
+# MAGIC classic), but they fail for different reasons. This tags each with a coarse
+# MAGIC reason so the run summary and the durable log can say "N failed because of
+# MAGIC X" instead of one opaque count. The raw error is kept verbatim; this only
+# MAGIC adds a label and never changes routing.
+
+# COMMAND ----------
+
+# Ordered (reason, regex) pairs -- FIRST match wins, so the most specific cause
+# goes first. Unmatched -> "other" (the honest default; raw error still captured).
+_HARD_REASON_PATTERNS = [
+    # Iceberg v2 merge-on-read DELETE FILES: the dominant real cause. The convert
+    # aborts with "requirement failed" at DeleteFileWrapper / loadIcebergFiles.
+    # (v3 deletion vectors convert fine, so this is specific to v2 delete files.)
+    ("v2_mor_delete_files", r"DeleteFileWrapper|loadIcebergFiles|merge-on-read|row-level delete"),
+    # Stale Glue pointer: the metadata.json the catalog points at is gone.
+    ("stale_metadata_pointer", r"metadata\.json[^\n]*does not exist|NoSuchKey|NotFound:[^\n]*metadata"),
+    # Visible in the source but not yet synced into the UC foreign catalog -> "not
+    # found". Usually transient: a SHOW TABLES / catalog resync fixes it.
+    ("table_not_found", r"NO_SUCH_CATALOG_EXCEPTION|TABLE_OR_VIEW_NOT_FOUND|Table or view .* not found|does not exist"),
+    ("permission", r"PERMISSION_DENIED|does not have privilege|AccessDenied|not authorized"),
+]
+_HARD_REASON_COMPILED = [(n, re.compile(p, re.IGNORECASE | re.DOTALL)) for n, p in _HARD_REASON_PATTERNS]
+
+
+def classify_hard_reason(err_msg: str) -> str:
+    """Coarse reason label for a non-OOM failure. Does NOT affect routing."""
+    for name, pat in _HARD_REASON_COMPILED:
+        if pat.search(err_msg):
+            return name
+    return "other"
+
+
+# Self-check the reason classifier too, so a future edit can't silently collapse
+# every failure to "other".
+assert classify_hard_reason(
+    "java.lang.IllegalArgumentException: requirement failed at "
+    "com.databricks.sql.transaction.tahoe.commands.convert.DeleteFileWrapper.<init>"
+) == "v2_mor_delete_files", "reason classifier missed the v2 merge-on-read delete-file signature"
+assert classify_hard_reason(
+    "AnalysisException: foreign Iceberg table uses row-level deletes (merge-on-read), unsupported for x"
+) == "v2_mor_delete_files", "reason classifier missed the merge-on-read message"
+assert classify_hard_reason("AnalysisException: Table or view 'x' not found") == "table_not_found"
+assert classify_hard_reason("PERMISSION_DENIED: user does not have privilege on table") == "permission"
+assert classify_hard_reason("some brand new error nobody has seen") == "other"
+print("hard-failure reason classifier sanity check passed.")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Run mode
 # MAGIC
 # MAGIC * **live**  -- actually issue `REFRESH FOREIGN TABLE` against each table.
@@ -282,6 +334,14 @@ SIMULATED_ERRORS = {
     "catalog.schema.missing_table": (
         "AnalysisException: Table or view 'missing_table' not found in catalog 'catalog'"
     ),
+    # v2 merge-on-read delete files -> the dominant real hard failure (confirmed by
+    # live testing). The convert aborts on the delete files; classic can't fix it.
+    "catalog.schema.mor_v2_table": (
+        "Job aborted due to stage failure: java.lang.IllegalArgumentException: requirement failed\n"
+        "\tat scala.Predef$.require(Predef.scala:324)\n"
+        "\tat com.databricks.sql.transaction.tahoe.commands.convert.DeleteFileWrapper.<init>(IcebergSparkWrappers.scala:191)\n"
+        "\tat com.databricks.sql.transaction.tahoe.commands.convert.IcebergFileManifest.loadIcebergFiles(IcebergFileManifest.scala:292)"
+    ),
 }
 
 
@@ -314,7 +374,7 @@ else:
 
 retry_on_classic = []   # OOM-class: hand to the classic fallback task
 hard_failures = []      # everything else: alert, do not retry
-failure_rows = []       # every failure, for the durable log: (table, action, error)
+failure_rows = []       # every failure, for the durable log: (table, action, reason, error)
 succeeded = 0
 
 for t in tables_to_process:
@@ -328,11 +388,12 @@ for t in tables_to_process:
         if is_oom_class(msg):
             print(f"  OOM-class (-> classic): {t} :: {msg[:160]}")
             retry_on_classic.append(t)
-            failure_rows.append((t, "oom_retry_classic", msg[:4000]))
+            failure_rows.append((t, "oom_retry_classic", "oom", msg[:4000]))
         else:
-            print(f"  hard failure (-> logged, not retried): {t} :: {msg[:160]}")
-            hard_failures.append({"table": t, "error": msg[:1000]})
-            failure_rows.append((t, "hard_skip", msg[:4000]))
+            reason = classify_hard_reason(msg)
+            print(f"  hard failure [{reason}] (-> logged, not retried): {t} :: {msg[:160]}")
+            hard_failures.append({"table": t, "error": msg[:1000], "reason": reason})
+            failure_rows.append((t, "hard_skip", reason, msg[:4000]))
 
 # Counts only -- the per-table detail above is the full list (no giant single-line
 # dump, so a run with many failures can't blow up the output).
@@ -340,6 +401,16 @@ print("\nServerless pass complete.")
 print(f"  succeeded on serverless        : {succeeded}")
 print(f"  OOM-class (retried on classic) : {len(retry_on_classic)}")
 print(f"  hard failures (logged, skipped): {len(hard_failures)}")
+
+# Per-reason breakdown of the hard failures, so the operator sees WHY at a glance
+# (e.g. v2 merge-on-read delete files vs not-found vs permission). Bounded to a
+# handful of reason lines no matter how many tables failed.
+if hard_failures:
+    from collections import Counter
+    _by_reason = Counter(h.get("reason", "other") for h in hard_failures)
+    print("  hard-failure reasons:")
+    for _reason, _n in _by_reason.most_common():
+        print(f"    {_reason:24s}: {_n}")
 
 # Publish the two COUNTS the condition tasks branch on RIGHT NOW -- before the
 # durable-log write and the DBFS handoff -- so even if a later line ever throws,
@@ -363,13 +434,14 @@ def log_failures(rows):
     try:
         from pyspark.sql import functions as F
         df = (
-            spark.createDataFrame(rows, "table_name string, action string, error_message string")
+            spark.createDataFrame(rows, "table_name string, action string, reason string, error_message string")
             .withColumn("run_id", F.lit(RUN_ID))
             .withColumn("mode", F.lit(MODE))
             .withColumn("logged_at", F.current_timestamp())
-            .select("logged_at", "run_id", "mode", "table_name", "action", "error_message")
+            .select("logged_at", "run_id", "mode", "table_name", "action", "reason", "error_message")
         )
-        df.write.mode("append").saveAsTable(LOG_TABLE)
+        # mergeSchema so a log table created by a pre-reason version gains the column.
+        df.write.mode("append").option("mergeSchema", "true").saveAsTable(LOG_TABLE)
         print(f"Logged {len(rows)} failure(s) to {LOG_TABLE}.")
     except Exception as e:  # noqa: BLE001 -- logging must not fail the refresh
         print(f"WARN: could not write durable log to {LOG_TABLE}: {type(e).__name__}: {e}")

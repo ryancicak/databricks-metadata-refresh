@@ -15,7 +15,9 @@ resources:
       schedule:
         quartz_cron_expression: ${var.schedule_cron}
         timezone_id: ${var.schedule_timezone}
-        # Created paused on purpose. Validate a manual run, then unpause.
+        # Created paused on purpose. NOTE: every redeploy re-applies this, so it
+        # re-pauses a schedule you unpaused. Set UNPAUSED here to make unpaused the
+        # deployed state, or re-unpause in the Jobs UI after each deploy.
         pause_status: PAUSED
 
       # Never let two refresh runs stack up on the same tables.
